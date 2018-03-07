@@ -288,6 +288,9 @@ classdef OptImageBar < dj.Imported
                 % contour
                 hold on
                 contour(h,'showtext','on','linewidth',1,'levellist',0:0.05:1)
+                title(sprintf(...
+                    'animal:%d session%d scan:%d axis:%s',...
+                    keys(ikey).animal_id,keys(ikey).session,keys(ikey).scan_idx,keys(ikey).axis))
             end
         end
         
