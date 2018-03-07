@@ -108,7 +108,7 @@ classdef OptImageBar < dj.Imported
             disp 'Preprocessing...'
             
             % DF/F
-            mData = int16(mean(Data));
+            mData = mean(Data);
             Data = bsxfun(@rdivide,bsxfun(@minus,Data,mData),mData);
             
             % loop through axis
