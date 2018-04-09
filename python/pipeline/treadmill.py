@@ -7,8 +7,6 @@ from .utils.h5 import read_video_hdf5, ts2sec
 from . import experiment, notify
 from .exceptions import PipelineException
 
-import datajoint as dj
-
 from scipy.interpolate import interp1d
 
 schema = dj.schema('pipeline_treadmill', locals())
@@ -56,6 +54,7 @@ class Sync(dj.Computed):
         self.insert1(dict(key, frame_times=dat_time[peaks]))
         self.notify(key)
 
+    @notify.ignore_exceptions
     def notify(self, key):
         msg = 'treadmill.Sync for `{}` has been populated.'.format(key)
         (notify.SlackUser() & (experiment.Session() & key)).notify(msg)
@@ -121,6 +120,7 @@ class Treadmill(dj.Computed):
         self.insert1(key)
         self.notify({k: key[k] for k in self.heading.primary_key})
 
+    @notify.ignore_exceptions
     def notify(self, key):
         msg = 'treadmill.Treadmill for `{}` has been populated.'.format(key)
         (notify.SlackUser() & (experiment.Session() & key)).notify(msg)
