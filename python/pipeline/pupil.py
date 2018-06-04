@@ -76,7 +76,7 @@ class Eye(dj.Imported):
         packet_length = data['analogPacketLen']
         dat_time, _ = ts2sec(data['ts'], packet_length)
 
-        if float(data['version']) == 2.:
+        if round(float(data['version'])) == 2.:
             cam_key = 'eyecam_ts'
             eye_time, _ = ts2sec(data[cam_key][0])
         else:
