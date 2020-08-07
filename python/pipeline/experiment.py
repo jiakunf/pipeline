@@ -473,9 +473,9 @@ class HasFilename:
 
         # TODO: test local cache
         local_path = lab.Paths().get_local_path(scan_path)
-        drive_idx = scan_path.find('/scratch') + 1
-        drive_name = scan_path[drive_idx: drive_idx + 9]
-        cache_path = scan_path.replace(drive_name, 'md0')
+        drive_idx = local_path.find('/scratch') + 1
+        drive_name = local_path[drive_idx: drive_idx + 9]
+        cache_path = local_path.replace(drive_name, 'md0')
 
         scan_name = (self.__class__() & self.proj()).fetch1('filename')
         local_filename = os.path.join(local_path, scan_name) + '*.tif'  # all parts
