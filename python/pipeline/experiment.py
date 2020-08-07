@@ -480,7 +480,7 @@ class HasFilename:
         scan_name = (self.__class__() & self.proj()).fetch1('filename')
         local_filename = os.path.join(local_path, scan_name) + '*.tif'  # all parts
         cache_filename = os.path.join(cache_path, scan_name) + '*.tif'
-        test_file = os.path.join(cache_path, scan_name) + '00001.tif'
+        test_file = os.path.join(cache_path, scan_name) + '_00001.tif'
         #---------------------
         # TODO: remove this
         from IPython import embed
