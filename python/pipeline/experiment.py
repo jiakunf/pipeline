@@ -482,6 +482,7 @@ class HasFilename:
         cache_filename = os.path.join(cache_path, scan_name) + '*.tif'
         test_file = os.path.join(cache_path, scan_name) + '_00001.tif'
         if os.path.exists(test_file):
+            print('Using local cache')
             return cache_filename
         else:
             return local_filename
