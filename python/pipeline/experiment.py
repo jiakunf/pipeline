@@ -128,7 +128,9 @@ class Person(dj.Lookup):
         ['Paul', 'hey paul'],
         ['shan', 'Shan Shen'],
         ['shuang', 'Shuang Li'],
-        ['xiaolong', 'Xiaolong Jiang']
+        ['xiaolong', 'Xiaolong Jiang'],
+        ['taliah', 'Taliah Muhammad'],
+        ['zhiwei',  'Zhiwei Ding']
     ]
 
 
@@ -296,7 +298,8 @@ class LaserCalibration(dj.Manual):
 
 @schema
 class MonitorCalibration(dj.Manual):
-    definition = """ # Monitor luminance calibration
+    definition = """ # monitor luminance calibration
+    
     -> experiment.Scan
     ---
     pixel_value             : mediumblob      # control pixel value (0-255)
@@ -332,11 +335,86 @@ class MonitorCalibration(dj.Manual):
 
 
 @schema
+class MouseRoom(dj.Lookup):
+    definition = """ # Mouse location after surgery
+    mouse_room                : varchar(64)         # Building letter along with room number
+    """
+    contents = [
+        ['T019'],
+        ['T057'],
+        ['T082C'],
+        ['Other'],
+    ]
+
+
+@schema
+class SurgeryType(dj.Lookup):
+    definition = """ # diff types of surgery
+    
+    surgery_type                : varchar(64)         # Types of surgery performed on mice
+    """
+    contents = [
+        ['Cranial Window and Headbar'],
+        ['Headbar'],
+        ['Burr Hole and Suture'],
+        ['C-Section'],
+        ['Viral Injection'],
+        ['Electroporation']
+    ]
+
+
+@schema
+class SurgeryOutcome(dj.Lookup):
+    definition = """ # surgery outcomes
+    
+    surgery_outcome             : varchar(32)         # Possible outcomes of surgeries performed on mice
+    """
+    contents = [
+        ['Survival'],
+        ['Non-Survival'],
+    ]
+
+
+@schema
+class Surgery(dj.Manual):
+    definition = """ # surgeries performed on mice
+    -> mice.Mice
+    surgery_id                   : smallint               # Unique number given to each surgery
+    ---
+    date                         : date                   # YYYY-MM-DD Format. Date surgery was performed
+    time                         : time                   # Start of mouse recovery
+    -> Person
+    -> MouseRoom            
+    -> SurgeryOutcome
+    -> SurgeryType
+    surgery_quality              : tinyint                # 0-5 self-rating, 0 being worst and 5 best
+    ketoprofen = null            : decimal(4,3) unsigned  # Amount of Ketoprofen given to mouse
+    weight = null                : decimal(5,2) unsigned  # Weight of mouse before surgery
+    surgery_notes = ""           : varchar(256)           # Notes on surgery
+    """
+
+
+@schema
+class SurgeryStatus(dj.Manual):
+    definition = """ # updates to surgeries
+    
+    -> Surgery
+    timestamp                           : timestamp              # Timestamp of entry
+    ---
+    euthanized = 0                      : boolean
+    day_one = 0                         : boolean                # First day checkup performed
+    day_two = 0                         : boolean                # Second day checkup performed
+    day_three = 0                       : boolean                # Third day checkup performed
+    checkup_notes = ""                  : varchar(265)           # Notes on surgery checkups
+    """
+
+
+@schema
 class Session(dj.Manual):
     definition = """  # imaging session
 
     -> mice.Mice
-    session                       : smallint            # session index for the mouse
+    session                      : smallint            # session index for the mouse
     ---
     -> Rig
     session_date                  : date                # date
@@ -514,5 +592,67 @@ class AutoProcessing(dj.Manual):
     priority=0          :tinyint       # highest priority is processed first
     autosegment=false   :boolean       # segment somas in the first channel with default method
     """
+
+@schema
+class ProjectorColor(dj.Lookup):
+    definition = """
+    # color options for projector channels
+    color               : varchar(32)               # color name
+    ---
+    """
+    contents = [
+        ['none'],
+        ['red'],
+        ['green'],
+        ['blue'],
+        ['UV']
+    ]
+
+@schema
+class ProjectorConfig(dj.Lookup):
+    definition = """
+    # projector configuration
+    projector_config_id         : tinyint                   # projector config    
+    ---
+    -> ProjectorColor.proj(channel_1="color")               # channel 1 means 1st color channel. Usually red
+    -> ProjectorColor.proj(channel_2="color")               # channel 2 means 2nd color channel. Usually green
+    -> ProjectorColor.proj(channel_3="color")               # channel 3 means 3rd color channel. Usually blue
+    refresh_rate                : float                     # refresh rate in Hz
+
+    """
+    contents = [
+        [0, 4, 2, 3, 60],
+        [1, 4, 4, 2, 60],
+        [2, 4, 4, 2, 30]
+    ]
+
+
+@schema
+class Projector(dj.Lookup):
+    definition = """
+    # projector specifications
+    projector_id        : tinyint                               # projector id
+    ---
+    pixel_width         : smallint                              # number of pixels in width
+    pixel_height        : smallint                              # number of pixels in height
+    """
+    contents = [
+        [0, 1920, 1080],
+        [1, 1140, 912]
+    ]
+
+
+@schema
+class ProjectorSetup(dj.Lookup):
+    definition = """
+    # projector set up
+    -> Projector
+    -> ProjectorConfig
+    ---
+    display_width       : float         # projected display width in cm
+    display_height      : float         # projected display height in cm
+    target_distance     : float         # distance from mouse to the display in cm
+    """
+
 
 schema.spawn_missing_classes()

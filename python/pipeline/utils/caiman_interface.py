@@ -225,7 +225,7 @@ def extract_masks(scan, mmap_scan, num_components=200, num_background_components
     background_traces = f  # num_background_components x num_frames
     raw_traces = C + YrA  # num_components x num_frames
 
-    # Rescale traces to match scan range (~ np.average(trace*mask, weights=mask))
+    # Rescale traces to match scan range
     scaling_factor = np.sum(masks**2, axis=(0, 1)) / np.sum(masks, axis=(0, 1))
     traces = traces * np.expand_dims(scaling_factor, -1)
     raw_traces = raw_traces * np.expand_dims(scaling_factor, -1)
@@ -411,7 +411,7 @@ def get_centroids(masks):
     return centroids
 
 
-def classify_masks(masks, soma_diameter=(14, 14)):
+def classify_masks(masks, soma_diameter=(12, 12)):
     """ Uses a convolutional network to predict the probability per mask of being a soma.
 
     :param np.array masks: Masks (image_height x image_width x num_components)
