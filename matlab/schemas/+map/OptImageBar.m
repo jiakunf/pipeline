@@ -23,7 +23,7 @@ classdef OptImageBar < dj.Imported
             % get frame times
             if ~exists(stimulus.Sync & key)
                 disp 'Syncing...'
-                populate(stimulus.Sync,key)
+                makeTuples(stimulus.Sync,key)
             end
             frame_times =fetch1(stimulus.Sync & key,'frame_times');
             
@@ -53,6 +53,7 @@ classdef OptImageBar < dj.Imported
                         vessels = int16(squeeze(mean(getOpticalData(keys(end)))));
                     end
                     pxpitch = 3800/size(Data,2);
+                    mData = mean(Data);
                 case 'scanimage'
                     % get Optical data
                     disp 'loading movie...'
@@ -71,10 +72,10 @@ classdef OptImageBar < dj.Imported
                         frame_start = find(frame_times>=mn,1,'first');
                         frame_end = find(frame_times>mx,1,'first');
                         frame_times = frame_times(frame_start:frame_end);
-                         
+                        
                         % get Data
                         Data = permute(squeeze(mean(reader(:,:,:,1,frame_start:frame_end),1,'native')),[3 1 2]);
-
+                        
                     else
                         reader = preprocess.getGalvoReader(key);
                         
@@ -102,13 +103,15 @@ classdef OptImageBar < dj.Imported
                     
                     % get the vessel image
                     vessels = int16(squeeze(mean(Data(:,:,:))));
+                    
+                    % calc mean
+                    mData = int16(mean(Data));
             end
             
             % Preprocessing data
             disp 'Preprocessing...'
             
             % DF/F
-            mData = mean(Data);
             Data = bsxfun(@rdivide,bsxfun(@minus,Data,mData),mData);
             
             % loop through axis
@@ -151,7 +154,7 @@ classdef OptImageBar < dj.Imported
                 t = (0:L-1)*T; % time series
                 
                 % do it
-                R = exp(2*pi*1i*t*tf +100*pi*1i*tf)*dataCell;
+                R = exp(2*pi*1i*t*tf)*dataCell;
                 imP = squeeze(reshape((angle(R)),imsize(2),imsize(3)));
                 imA = squeeze(reshape((abs(R)),imsize(2),imsize(3)));
                 
@@ -202,25 +205,14 @@ classdef OptImageBar < dj.Imported
                 vessels = single(vessels);
                 
                 % process image range
-                imP(imP<-3.14) = imP(imP<-3.14) +3.14*2;
-                imP(imP>3.14) = imP(imP>3.14) -3.14*2;
-                uv =linspace(-3.14,3.14,20) ;
-                n = histc(imP(:),uv);
-                [~,i] = min(n(1:end-1)) ;
-                minmode = uv(i);
-                imP = imP+minmode+3.14;
-                imP(imP<-3.14) = imP(imP<-3.14) +3.14*2;
-                imP(imP>3.14) = imP(imP>3.14) -3.14*2;
-                if ~isempty(params.exp)
-                    imP = imP-nanmedian(imP(:));
-                    imP(imP<-3.14) = imP(imP<-3.14) +3.14*2;
-                    imP(imP>3.14) = imP(imP>3.14) -3.14*2;
-                    imP = imP+params.shift;
-                    imP(imP<0) = normalize(exp((normalize((imP(imP<0)))+1).^params.exp))-1;
-                    imP(imP>0) =  normalize(-exp((normalize((-imP(imP>0)))+1).^params.exp));
-                end
+                imP = wrapTo2Pi(imP);
+                mn = prctile(imP(:),1);
+                mx = prctile(imP(:),99);
+                imP(imP<mn) = mn;
+                imP(imP>mx) = mx;
+                imP = normalize(imP)*2*pi - pi;
                 imA(imA>prctile(imA(:),99)) = prctile(imA(:),99);
-                
+                  
                 % create the hsv map
                 h = imgaussfilt(normalize(imP),params.sigma);
                 s = imgaussfilt(normalize(imA),params.sigma)*params.saturation;
@@ -244,8 +236,10 @@ classdef OptImageBar < dj.Imported
                     % plot
                     angle_map = hsv2rgb(cat(3,h,cat(3,ones(size(s)),ones(size(v)))));
                     combined_map = hsv2rgb(cat(3,h,s,v));
-                    if params.subplot
+                    if params.subplot==1
                         imshowpair(angle_map,combined_map,'montage')
+                    elseif params.subplot==2
+                        imshow(combined_map)
                     else
                         imshow(angle_map)
                     end
@@ -288,9 +282,6 @@ classdef OptImageBar < dj.Imported
                 % contour
                 hold on
                 contour(h,'showtext','on','linewidth',1,'levellist',0:0.05:1)
-                title(sprintf(...
-                    'animal:%d session%d scan:%d axis:%s',...
-                    keys(ikey).animal_id,keys(ikey).session,keys(ikey).scan_idx,keys(ikey).axis))
             end
         end
         
@@ -299,16 +290,22 @@ classdef OptImageBar < dj.Imported
             params.grad_gauss = 1;
             params.scale = 5;
             params.exp = 1;
+            params.vcontrast = 0.3;
             
             params = ne7.mat.getParams(params,varargin);
             
             % find horizontal & verical map keys
-            Hkeys = fetch(map.OptImageBar & (experiment.Session & obj) & 'axis="horizontal"');
-            Vkeys = fetch(map.OptImageBar & (experiment.Session & obj) & 'axis="vertical"');
+            if ~exists(obj & 'axis = "horizontal"') ||  ~exists(obj & 'axis = "vertical"')
+                Hkeys = fetch(map.OptImageBar & (experiment.Session & obj) & 'axis="horizontal"');
+                Vkeys = fetch(map.OptImageBar & (experiment.Session & obj) & 'axis="vertical"');
+            else
+                Hkeys = fetch(obj & 'axis="horizontal"');
+                Vkeys = fetch(obj & 'axis="vertical"');
+            end
             
             % fetch horizontal & vertical maps
-            [Hor(:,:,1),Hor(:,:,2),Hor(:,:,3)] = plot(map.OptImageBar & Hkeys(end),'exp',params.exp);
-            [Ver(:,:,1),Ver(:,:,2),Ver(:,:,3)] = plot(map.OptImageBar & Vkeys(end),'exp',params.exp);
+            [Hor(:,:,1),Hor(:,:,2),Hor(:,:,3)] = plot(map.OptImageBar & Hkeys(end),'exp',params.exp,'vcontrast',params.vcontrast);
+            [Ver(:,:,1),Ver(:,:,2),Ver(:,:,3)] = plot(map.OptImageBar & Vkeys(end),'exp',params.exp,'vcontrast',params.vcontrast);
             
             % get vessels
             vessels = normalize(Hor(:,:,3));

@@ -43,46 +43,50 @@ def mirrconv(signal, f):
     return filtered_signal
 
 
-def local_max(x):
-    N = x.size
-    x = x.ravel()
-    b1 = x[:N-1] <= x[1:] # left <= right
-    b2 = x[:N-1] >  x[1:] # left > right
-    k = np.where(b1[:-1] & b2[1:])[0] + 1
-    if x[0]>x[1]:
-        k = np.hstack((k, [0]))
-
-    if x[-1]>x[-2]:
-        k = np.hstack((k, [N-1]))
-    k.sort()
-    return k
-
-
-def spaced_max(x, min_interval, thresh=None):
-    peaks = local_max(x)
-    if thresh is not None:
-        peaks = peaks[x(peaks) > thresh]
-
-    if len(peaks) == 0:
-        idx = []
-    else:
-        idx = [peaks[0]]
-        for i in peaks[1:]:
-            if i - idx[-1] >= min_interval:
-                idx.append(i)
-            elif x[i] > x[idx[-1]]:
-                idx[-1] = i
-    return np.array(idx)
-
-
-def longest_contiguous_block(idx):
-    d = np.diff(idx)
-    ix = np.hstack(([-1], np.where(d > 10*np.median(d))[0], [len(idx)]))
-    f = [idx[ix[i] + 1: ix[i+1]] for i in range(len(ix)-1)]
-    return f[np.argmax([len(e) for e in f])]
-
 def float2uint8(scan):
     """ Converts an scan (or image) from floats to uint8 (preserving the range)."""
     scan = (scan - scan.min()) / (scan.max() - scan.min())
     scan = (scan * 255).astype(np.uint8, copy=False)
     return scan
+
+
+def spaced_max(x, min_interval):
+    """ Find all local peaks that are at least min_interval indices apart."""
+    from scipy.signal import argrelmax
+
+    peaks = argrelmax(x)[0]
+    if len(peaks) != 0:
+        new_peaks = [peaks[0]]
+        for next_candidate in peaks[1:]:
+            if next_candidate - new_peaks[-1] >= min_interval:
+                new_peaks.append(next_candidate)
+            elif x[next_candidate] > x[new_peaks[-1]]:
+                new_peaks[-1] = next_candidate
+        peaks = np.array(new_peaks)
+
+    return peaks
+
+
+def low_pass_filter(signal, sampling_freq, cutoff_freq, filter_size=1000):
+    """ Low pass filter a signal.
+
+    :param signal: Signal to filter.
+    :param sampling_freq: Signal sampling frequency.
+    :param cutoff_freq: Cutoff frequency. Frequencies above this will be filtered out.
+    :param filter_size: Size of the filter to use. If even, we use filter_size + 1.
+    :return: Filtered signal (same lenght as signal)
+
+    ..seealso: http://www.labbookpages.co.uk/audio/firWindowing.html
+    """
+    # Create filter
+    half_size = filter_size // 2
+    x = np.arange(-half_size, half_size + 1)
+    filter_ = np.sin(2 * np.pi * (cutoff_freq / sampling_freq) * x) / (np.pi * x + 1e-9)
+    filter_[half_size] = 2 * cutoff_freq / sampling_freq
+    filter_ *= np.blackman(len(filter_))
+    filter_ /= filter_.sum()
+
+    # Filter signal
+    filtered_signal = mirrconv(signal, filter_)
+
+    return filtered_signal

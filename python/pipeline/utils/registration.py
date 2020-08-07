@@ -1,198 +1,107 @@
 import numpy as np
-from skimage import feature
-from scipy import ndimage
+import torch
+from torch.nn import functional as F
 
-import time
 
-def register_rigid(stack, field, z_estimate, z_range, yaw=0, pitch=0, roll=0):
-    """ Registers using skimage.feature match_template.
+def create_grid(um_sizes, desired_res=1):
+    """ Create a grid corresponding to the sample position of each pixel/voxel in a FOV of
+     um_sizes at resolution desired_res. The center of the FOV is (0, 0, 0).
 
-    Rotates the stack, cross-correlates the field at each position and returns the score,
-    coordinates and angles of the best one. We use a right handed coordinate system (x
-    points to the right, y towards you, and z downward) with right-handed/clockwise
-    rotations.
+    In our convention, samples are taken in the center of each pixel/voxel, i.e., a volume
+    centered at zero of size 4 will have samples at -1.5, -0.5, 0.5 and 1.5; thus edges
+    are NOT at -2 and 2 which is the assumption in some libraries.
 
-    Stack is rotated with the inverse of the intrinsic yaw->pitch->roll rotation adding
-    some slack above and below the desired slices to avoid black spaces after rotation.
-    After rotation, we cut any black spaces in x and y and then run the cross-correlation.
+    :param tuple um_sizes: Size in microns of the FOV, .e.g., (d1, d2, d3) for a stack.
+    :param float or tuple desired_res: Desired resolution (um/px) for the grid.
 
-    Note on ndimage.rotate: Assuming our coordinate system; axes=(1, 2) will do a left
-    handed rotation in z, (0, 2) a right handed rotation in y and (0, 1) a left handed
-    rotation in x.
-
-    :param np.array: 3-d stack (depth, height, width).
-    :param np.array field: 2-d field to register in the stack.
-    :param float z_estimate: Initial estimate of best z.
-    :param float z_range: How many slices to search above (and below) z_estimate.
-    :param float yaw: Angle in degrees for rotation over z axis.
-    :param float pitch: Angle in degrees for rotation over y axis.
-    :param float roll: Angle in degrees for rotation over x axis.
-
-    : returns best_score, (x, y, z), (yaw, pitch, roll). Best score is the highest
-        correlation found. (x, y, z) are expressed as distances to the center of the
-        stack. And yaw, pitch, roll are the same as the input.
+    :return: A (d1 x d2 x ... x dn x n) array of coordinates. For a stack, the points at
+    each grid position are (x, y, z) points; (x, y) for fields. Remember that in our stack
+    coordinate system the first axis represents z, the second, y and the third, x so, e.g.,
+    p[10, 20, 30, 0] represents the value in x at grid position 10, 20, 30.
     """
-    print(time.ctime(), 'Processing angles', (yaw, pitch, roll))
+    # Make sure desired_res is a tuple with the same size as um_sizes
+    if np.isscalar(desired_res):
+        desired_res = (desired_res,) * len(um_sizes)
 
-    # Get rotation matrix
-    R = create_rotation_matrix(yaw, pitch, roll)
-    R_inv = np.linalg.inv(R)
+    # Create grid
+    out_sizes = [int(round(um_s / res)) for um_s, res in zip(um_sizes, desired_res)]
+    um_grids = [np.linspace(-(s - 1) * res / 2, (s - 1) * res / 2, s, dtype=np.float32)
+                for s, res in zip(out_sizes, desired_res)] # *
+    full_grid = np.stack(np.meshgrid(*um_grids, indexing='ij')[::-1], axis=-1)
+    # * this preserves the desired resolution by slightly changing the size of the FOV to
+    # out_sizes rather than um_sizes / desired_res.
 
-    # Compute how high in z we'll need to cut the rotated stack to account for z = z_range
-    h, w = stack.shape[1] / 2, stack.shape[2] / 2 # y, x
-    corners_at_zrange = [[-w, -h, z_range], [w, -h, z_range], [w, h, z_range], [-w, h, z_range]] # clockwise, starting at upper left
-    rot_corners_at_zrange = np.dot(R_inv, np.array(corners_at_zrange).T)
-    rot_ztop = np.max(rot_corners_at_zrange[2])
-
-    # Calculate amount of slack in the initial stack needed to avoid black voxels after rotation.
-    corners_at_zero = [[-w, -h, 0], [w, -h, 0], [w, h, 0], [-w, h, 0]]
-    corners_at_100= [[-w, -h, 100], [w, -h, 100], [w, h, 100], [-w, h, 100]]
-    rot_corners_at_zero = np.dot(R_inv, np.array(corners_at_zero).T) #
-    rot_corners_at_100 = np.dot(R_inv, np.array(corners_at_100).T)
-    rot_corners_at_ztop = find_intersecting_point(rot_corners_at_zero, rot_corners_at_100, rot_ztop)
-    corners_at_ztop = np.dot(R, rot_corners_at_ztop) # map back to original stack coordinates
-    z_slack = np.max(corners_at_ztop[2])
-
-    # Restrict stack to relevant part in z
-    mini_stack = stack[max(0, int(round(z_estimate - z_slack))): int(round(z_estimate + z_slack))]
-
-    # Rotate stack (inverse of intrinsic yaw-> pitch -> roll)
-    rotated = ndimage.rotate(mini_stack, yaw, axes=(1, 2), order=1) # yaw(-w)
-    rotated = ndimage.rotate(rotated, -pitch, axes=(0, 2), order=1) # pitch(-v)
-    rotated = ndimage.rotate(rotated, roll, axes=(0, 1), order=1) # roll(-u)
-
-    # Calculate where to cut rotated stack (at z_est)
-    z_est = (z_estimate - max(0, int(round(z_estimate - z_slack)))) - mini_stack.shape[0] / 2
-    rot_z_est = np.dot(R_inv, [0, 0, z_est])[2]
-    min_z, max_z = rot_z_est - rot_ztop, rot_z_est + rot_ztop
-    top_corners = find_intersecting_point(rot_corners_at_zero, rot_corners_at_100, max(-rotated.shape[0] / 2, min_z))
-    bottom_corners = find_intersecting_point(rot_corners_at_zero, rot_corners_at_100, min(rotated.shape[0] / 2, max_z))
-    min_x = max(*top_corners[0, [0, 3]], *bottom_corners[0, [0, 3]])
-    max_x = min(*top_corners[0, [1, 2]], *bottom_corners[0, [1, 2]])
-    min_y = max(*top_corners[1, [0, 1]], *bottom_corners[1, [0, 1]])
-    max_y = min(*top_corners[1, [2, 3]], *bottom_corners[1, [2, 3]])
-
-    # Cut rotated stack
-    mini_rotated = rotated[max(0, int(round(rotated.shape[0] / 2 + min_z))): int(round(rotated.shape[0] / 2 + max_z)),
-                           max(0, int(round(rotated.shape[1] / 2 + min_y))): int(round(rotated.shape[1] / 2 + max_y)),
-                           max(0, int(round(rotated.shape[2] / 2 + min_x))): int(round(rotated.shape[2] / 2 + max_x))]
-    z_center = rotated.shape[0] / 2 - max(0, int(round(rotated.shape[0] / 2 + min_z)))
-    y_center = rotated.shape[1] / 2 - max(0, int(round(rotated.shape[1] / 2 + min_y)))
-    x_center = rotated.shape[2] / 2 - max(0, int(round(rotated.shape[2] / 2 + min_x)))
-
-    # Crop field FOV to be smaller than the stack's
-    cut_rows = max(1, int(np.ceil((field.shape[0] - mini_rotated.shape[1]) / 2)))
-    cut_cols = max(1, int(np.ceil((field.shape[1] - mini_rotated.shape[2]) / 2)))
-    field = field[cut_rows:-cut_rows, cut_cols:-cut_cols]
-
-    # Sharpen images
-    norm_field = sharpen_2pimage(field)
-    norm_stack = np.stack(sharpen_2pimage(s) for s in mini_rotated)
-
-    # 3-d match_template
-    corrs = np.stack(feature.match_template(s, norm_field, pad_input=True) for s in norm_stack)
-    smooth_corrs = ndimage.gaussian_filter(corrs, 0.7)
-    best_score = np.max(smooth_corrs)
-    z, y, x = np.unravel_index(np.argmax(smooth_corrs), smooth_corrs.shape)
-
-    # Express coordinates as distances to mini_stack/rotated center
-    x_offset = (x + 0.5) - x_center
-    y_offset = (y + 0.5) - y_center
-    z_offset = (z + 0.5) - z_center
-
-    # Map back to original stack coordinates
-    xp, yp, zp = np.dot(R, [x_offset, y_offset, z_offset])
-    zp = ((max(0, int(round(z_estimate - z_slack))) + mini_stack.shape[0] / 2 + zp) - stack.shape[0] / 2) # with respect to original z center
-
-    return best_score, (xp, yp, zp), (yaw, pitch, roll)
+    return full_grid
 
 
-def create_rotation_matrix(yaw, pitch, roll):
-    """ 3-D rotation matrix to apply a intrinsic yaw-> pitch-> roll rotation.
+def resize(original, um_sizes, desired_res):
+    """ Resize array originally of um_sizes size to have desired_res resolution.
 
-    We use a right handed coordinate system (x points to the right, y towards you, and z
-    downward) with right-handed/clockwise rotations.
+    We preserve the center of original and resized arrays exactly in the middle. We also
+    make sure resolution is exactly the desired resolution. Given these two constraints,
+    we cannot hold FOV of original and resized arrays to be exactly the same.
 
-    :param float yaw: Angle in degrees for rotation over z axis.
-    :param float pitch: Angle in degrees for rotation over y axis.
-    :param float roll: Angle in degrees for rotation over x axis.
+    :param np.array original: Array to resize.
+    :param tuple um_sizes: Size in microns of the array (one per axis).
+    :param int or tuple desired_res: Desired resolution (um/px) for the output array.
 
-    :returns: (3, 3) rotation matrix
-
-    ..ref:: danceswithcode.net/engineeringnotes/rotations_in_3d/rotations_in_3d_part1.html
+    :return: Output array (np.float32) resampled to the desired resolution. Size in pixels
+        is round(um_sizes / desired_res).
     """
-    w, v, u = yaw *np.pi/180, pitch * np.pi/180, roll * np.pi/180 # degrees to radians
-    sin, cos = np.sin, np.cos
-    rotation_matrix = [
-        [cos(v)*cos(w), sin(u)*sin(v)*cos(w) - cos(u)*sin(w), sin(u)*sin(w) + cos(u)*sin(v)*cos(w)],
-        [cos(v)*sin(w), cos(u)*cos(w) + sin(u)*sin(v)*sin(w), cos(u)*sin(v)*sin(w) - sin(u)*cos(w)],
-        [-sin(v),       sin(u)*cos(v),                        cos(u)*cos(v)]
-    ]
-    return rotation_matrix
+    import torch.nn.functional as F
+
+    # Create grid to sample in microns
+    grid = create_grid(um_sizes, desired_res) # d x h x w x 3
+
+    # Re-express as a torch grid [-1, 1]
+    um_per_px = np.array([um / px for um, px in zip(um_sizes, original.shape)])
+    torch_ones = np.array(um_sizes) / 2 - um_per_px / 2  # sample position of last pixel in original
+    grid = grid / torch_ones[::-1].astype(np.float32)
+
+    # Resample
+    input_tensor = torch.from_numpy(original.reshape(1, 1, *original.shape).astype(
+        np.float32))
+    grid_tensor = torch.from_numpy(grid.reshape(1, *grid.shape))
+    resized_tensor = F.grid_sample(input_tensor, grid_tensor, padding_mode='border')
+    resized = resized_tensor.numpy().squeeze()
+
+    return resized
 
 
-def find_intersecting_point(p1, p2, z):
-    """ Find a point at a given z in the line that crosses p1 and p2.
+def affine_product(X, A, b):
+    """ Special case of affine transformation that receives coordinates X in 2-d (x, y)
+    and affine matrix A and translation vector b in 3-d (x, y, z). Y = AX + b
 
-    :param np.array p1: A point (1-d array of size 3) or a matrix of points (3 x n).
-    :param np.array p2: A point (1-d array of size 3) or a matrix of points (3 x n).
-        Number of points in p2 needs to match p1.
-    :param float z: z to insersect the line.
+    :param torch.Tensor X: A matrix of 2-d coordinates (d1 x d2 x 2).
+    :param torch.Tensor A: The first two columns of the affine matrix (3 x 2).
+    :param torch.Tensor b: A 3-d translation vector.
 
-    :returns: A point (1-d array of size 3) or a matrix of points (3 x n).
-
-    ..ref:: https://brilliant.org/wiki/3d-coordinate-geometry-equation-of-a-line/
+    :return: A (d1 x d2 x 3) torch.Tensor corresponding to the transformed coordinates.
     """
-    direction_vector = p2 - p1
-    if any(abs(direction_vector[2]) < 1e-10):
-        raise ArithmeticError('Line is parallel to the z-plane. Infinite or no solutions.')
-    q = p1 + ((z - p1[2]) / direction_vector[2]) * direction_vector # p1 + ((z-z1)/ n) * d
-    return q
+    return torch.einsum('ij,klj->kli', (A, X)) + b
 
 
-def sharpen_2pimage(image, laplace_sigma=0.7, low_percentile=3, high_percentile=99.9):
-    """ Apply a laplacian filter, clip pixel range and normalize.
+def sample_grid(volume, grid):
+    """ Sample grid in volume.
 
-    :param np.array image: Array with raw two-photon images.
-    :param float laplace_sigma: Sigma of the gaussian used in the laplace filter.
-    :param float low_percentile, high_percentile: Percentiles at which to clip.
+    Assumes center of volume is at (0, 0, 0) and grid and volume have the same resolution.
 
-    :returns: Array of same shape as input. Sharpened image.
+    :param torch.Tensor volume: A d x h x w tensor. The stack.
+    :param torch.Tensor grid: A d1 x d2 x 3 (x, y, z) tensor. The coordinates to sample.
+
+    :return: A d1 x d2 tensor. The grid sampled in the stack.
     """
-    sharpened = image - ndimage.gaussian_laplace(image, laplace_sigma)
-    clipped = np.clip(sharpened, *np.percentile(sharpened, [low_percentile, high_percentile]))
-    norm = (clipped - clipped.mean()) / (clipped.max() - clipped.min())
-    return norm
+    # Make sure input is tensor
+    volume = torch.as_tensor(volume, dtype=torch.float32)
+    grid = torch.as_tensor(grid, dtype=torch.float32)
 
+    # Rescale grid so it ranges from -1 to 1 (as expected by F.grid_sample)
+    norm_factor = torch.as_tensor([s / 2 - 0.5 for s in volume.shape[::-1]])
+    norm_grid = grid / norm_factor
 
-def find_field_in_stack(stack, x, y, z, yaw, pitch, roll, height, width):
-    """ Get a cutout of the given height, width dimensions in the rotated stack at x, y, z.
+    # Resample
+    resampled = F.grid_sample(volume[None, None, ...], norm_grid[None, None, ...],
+                              padding_mode='zeros')
+    resampled = resampled.squeeze() # drop batch and channel dimension
 
-    :param np.array stack: 3-d stack (depth, height, width)
-    :param float x, y, z: Center of field measured as distance from the center in the
-        original stack (before rotation).
-    :param yaw, pitch, roll: Rotation angles to apply to the field.
-    :param height, width: Height and width of the cutout from the stack.
-
-    :returns: A height x width np.array at the desired location.
-    """
-    # Rotate stack (inverse of intrinsic yaw-> pitch -> roll)
-    rotated = ndimage.rotate(stack, yaw, axes=(1, 2), order=1) # yaw(-w)
-    rotated = ndimage.rotate(rotated, -pitch, axes=(0, 2), order=1) # pitch(-v)
-    rotated = ndimage.rotate(rotated, roll, axes=(0, 1), order=1) # roll(-u)
-
-    # Compute center of field in the rotated stack
-    R_inv = np.linalg.inv(create_rotation_matrix(yaw, pitch, roll))
-    rot_center = np.dot(R_inv, [x, y, z])
-    center_ind = np.array(rotated.shape) / 2 + rot_center[::-1] # z, y, x
-
-    # Crop field (interpolate at the desired positions)
-    z_coords = [center_ind[0] - 0.5] # -0.5 is because our (0.5, 0.5) is np.map_coordinates' (0, 0)
-    y_coords = np.arange(height) - height / 2 + center_ind[1] # - 0.5 is added by '- height / 2' term
-    x_coords = np.arange(width)  - width / 2 + center_ind[2]
-    coords = np.meshgrid(z_coords, y_coords, x_coords)
-    out = ndimage.map_coordinates(rotated, [coords[0].reshape(-1), coords[1].reshape(-1),
-                                            coords[2].reshape(-1)], order=1)
-    field = out.reshape([height, width])
-
-    return field
+    return resampled

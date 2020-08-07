@@ -37,7 +37,7 @@ catch
 end
 
 % Get version of the file
-version  = round(H5Tools.readAttribute(fp,'Version'));
+version  = H5Tools.readAttribute(fp,'Version');
 
 switch version
     case 1
@@ -129,7 +129,7 @@ switch version
         
         H5F.close(fp);
         
-    case 2
+    case {2, 2.1}
         % WH_channelNames = Position,Counter,Time
         % IM_channelNames = CTR Time, Real Time
 
@@ -155,14 +155,24 @@ switch version
         asVersion = H5Tools.readAttribute(fp,'AS_Version');
         switch asVersion
             case 2
-                assert(strcmp(deblank(waveformDescStr),'Photodiode, FrameSync, Time'),...
+                idx1 = find(waveformDescStr == ',') ; % need to take care of a comma misplacement in some files
+                waveformDescStr(idx1) = ' ' ;
+                teststr = 'Photodiode, FrameSync, Time' ;
+                idx2 = find(teststr == ',') ;
+                teststr(idx2) = ' ' ;
+                assert(strcmp(deblank(waveformDescStr),deblank(teststr)),...
             'waveform Channels Description is wrong for this file version');
                 wf = H5Tools.readDataset(fp,'Analog Signals') ;
                 data.syncPd = wf(:,1);
                 data.scanImage = wf(:,2);
                 data.ts = wf(:,3);
             case 2.1
-                assert(strcmp(deblank(waveformDescStr),'Photodiode, ScanImageFrameSync, LaserPower, Time'),...
+                idx1 = find(waveformDescStr == ',') ; % need to take care of a comma misplacement in some files
+                waveformDescStr(idx1) = ' ' ;
+                teststr = 'Photodiode, ScanImageFrameSync, LaserPower, Time' ;
+                idx2 = find(teststr == ',') ;
+                teststr(idx2) = ' ' ;
+                assert(strcmp(deblank(waveformDescStr),deblank(teststr)),...
             'waveform Channels Description is wrong for this file version');
                 wf = H5Tools.readDataset(fp,'Analog Signals') ;
                 data.syncPd = wf(:,1);
