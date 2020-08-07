@@ -58,7 +58,7 @@ def read_video_hdf5(hdf_path):
     data = {}
     with h5py.File(hdf_path, 'r', driver='family', memb_size=0) as fid:
         data['version'] = fid.attrs['Version']
-        if float(fid.attrs['Version']) == 2.:
+        if round(float(fid.attrs['Version'])) == 2.:
             data['ball'] = np.asarray(fid['Wheel']).T
             wf = np.asarray(np.asarray(fid['Analog Signals'])).T
             data['framenum_ts'] = np.asarray(fid['framenum_ts']).squeeze()

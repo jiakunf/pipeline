@@ -151,7 +151,7 @@ classdef OptImageBar < dj.Imported
                 t = (0:L-1)*T; % time series
                 
                 % do it
-                R = exp(2*pi*1i*t*tf)*dataCell;
+                R = exp(2*pi*1i*t*tf +100*pi*1i*tf)*dataCell;
                 imP = squeeze(reshape((angle(R)),imsize(2),imsize(3)));
                 imA = squeeze(reshape((abs(R)),imsize(2),imsize(3)));
                 
