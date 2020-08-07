@@ -481,6 +481,12 @@ class HasFilename:
         local_filename = os.path.join(local_path, scan_name) + '*.tif'  # all parts
         cache_filename = os.path.join(cache_path, scan_name) + '*.tif'
         test_file = os.path.join(cache_path, scan_name) + '00001.tif'
+        #---------------------
+        # TODO: remove this
+        from IPython import embed
+        embed()
+        exit()
+        #---------------------
         if os.path.exists(test_file):
             return cache_filename
         else:
