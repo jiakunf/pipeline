@@ -1,5 +1,5 @@
 #!/usr/local/bin/python3
-from pipeline import reso, meso, fuse, stack, pupil, treadmill
+from pipeline import reso, meso, fuse, stack, pupil, treadmill, posture
 from pipeline import experiment
 import time
 
@@ -17,12 +17,15 @@ while True:
     for priority in range(120, -130, -10): # highest to lowest priority
         next_scans = experiment.AutoProcessing() & 'priority > {}'.format(priority)
 
-        # pupil
-        pupil.Eye().populate(next_scans, reserve_jobs=True, suppress_errors=True)
-
         # treadmill
         treadmill.Sync().populate(next_scans, reserve_jobs=True, suppress_errors=True)
         treadmill.Treadmill().populate(next_scans, reserve_jobs=True, suppress_errors=True)
+
+        # pupil
+        pupil.Eye().populate(next_scans, reserve_jobs=True, suppress_errors=True)
+
+        # posture
+        posture.Posture().populate(next_scans, reserve_jobs=True, suppress_errors=True)
 
         # Stacks
         stack.StackInfo().populate(stack.CorrectionChannel(), reserve_jobs=True, suppress_errors=True) #TODO: stackAutoProcessing
@@ -41,9 +44,7 @@ while True:
             pipe.SummaryImages().populate(next_scans, reserve_jobs=True, suppress_errors=True)
 
         # Field Registration
-        priority_methods = [{'registration_method': 1}, {'registration_method': 2}]
-        stack.FieldRegistration().populate(next_scans, priority_methods, reserve_jobs=True,
-                                           suppress_errors=True)
+        stack.InitialRegistration().populate(next_scans, reserve_jobs=True, suppress_errors=True)
         stack.FieldRegistration().populate(next_scans, reserve_jobs=True, suppress_errors=True)
 
         # fuse
@@ -56,9 +57,10 @@ while True:
         if POPULATE_TUNE:
             tune_scans = next_scans & (experiment.Scan() & 'scan_ts > "2017-12-00 00:00:00"')
 
-            #stimulus.Sync needs to be ran from Matlab
+            #stimulus.Sync needs to be run from Matlab
             tune.STA().populate(tune_scans, reserve_jobs=True, suppress_errors=True)
             tune.STAQual().populate(tune_scans, reserve_jobs=True, suppress_errors=True)
+            tune.STAExtent().populate(tune_scans, reserve_jobs=True)
 
             tune.CaMovie().populate(tune_scans, reserve_jobs=True, suppress_errors=True)
             tune.Drift().populate(tune_scans, reserve_jobs=True, suppress_errors=True)
@@ -66,10 +68,13 @@ while True:
             tune.OriMap().populate(tune_scans, reserve_jobs=True, suppress_errors=True)
             tune.Cos2Map().populate(tune_scans, reserve_jobs=True, suppress_errors=True)
             tune.OriMapQuality().populate(tune_scans, reserve_jobs=True, suppress_errors=True)
-            #tune.CaTimes().populate(tune_scans, reserve_jobs=True, suppress_errors=True)
-            #tune.PixelwiseOri().populate(tune_scans, reserve_jobs=True, suppress_errors=True)
 
             tune.OracleMap().populate(tune_scans, reserve_jobs=True, suppress_errors=True)
+            tune.MovieOracle().populate(tune_scans, reserve_jobs=True, suppress_errors=True)
+
+            tune.CaTimes().populate(tune_scans, reserve_jobs=True, suppress_errors=True)
+            tune.Ori().populate(tune_scans, reserve_jobs=True, suppress_errors=True)
+            tune.Kuiper().populate(tune_scans, reserve_jobs=True, suppress_errors=True)
 
         # reso/meso (from Segmentation up)
         for pipe in [reso, meso]:

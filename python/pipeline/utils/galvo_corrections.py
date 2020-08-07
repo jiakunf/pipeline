@@ -1,8 +1,8 @@
 """ Utilities for motion and raster correction of resonant scans. """
+import numpy as np
 from scipy import interpolate  as interp
 from scipy import signal
-import numpy as np
-import scipy.ndimage as ndi
+from scipy import ndimage
 
 from ..exceptions import PipelineException
 from ..utils.signal import mirrconv
@@ -119,14 +119,15 @@ def fix_outliers(y_shifts, x_shifts, max_y_shift=20, max_x_shift=20, method='med
     """ Look for spikes in motion shifts and set them to a sensible value.
 
     Reject any shift whose y or x shift is higher than max_y_shift/max_x_shift pixels
-    from the median/moving average. Outliers filled by interpolating original traces
-    (after skipping all outliers).
+    from the median/linear estimate/moving average. Outliers filled by interpolating
+    valid points; in the edges filled with the median/linear estimate/moving average.
 
     :param np.array y_shifts/x_shifts: Shifts in y, x.
     :param float max_y_shift/max_x_shifts: Number of pixels used as threshold to classify
         a point as an outlier in y, x.
     :param string method: One of 'mean' or 'trend'.
-        'mean': Detect outliers as deviations from the median of the shifts.
+        'median': Detect outliers as deviations from the median of the shifts.
+        'linear': Detect outliers as deviations from a line estimated from the shifts.
         'trend': Detect outliers as deviations from the shift trend computed as a moving
             average over the entire scan.
 
@@ -141,35 +142,57 @@ def fix_outliers(y_shifts, x_shifts, max_y_shift=20, max_x_shift=20, method='med
     # Copy shifts to avoid changing originals
     y_shifts, x_shifts = y_shifts.copy(), x_shifts.copy()
 
-    # Get smooth traces
+    # Detrend shifts
     if method == 'median':
-        y_smooth = np.full(num_frames, np.median(y_shifts))
-        x_smooth = np.full(num_frames, np.median(x_shifts))
-    else:
+        y_trend = np.median(y_shifts)
+        x_trend = np.median(x_shifts)
+    elif method == 'linear':
+        x_trend = _fit_robust_line(x_shifts)
+        y_trend = _fit_robust_line(y_shifts)
+    else: # trend
         window_size = min(101, num_frames)
         window_size -= 1 if window_size % 2 == 0 else 0
-        y_smooth = mirrconv(y_shifts, np.ones(window_size) / window_size)
-        x_smooth = mirrconv(x_shifts, np.ones(window_size) / window_size)
+        y_trend = mirrconv(y_shifts, np.ones(window_size) / window_size)
+        x_trend = mirrconv(x_shifts, np.ones(window_size) / window_size)
+
+    # Subtract trend from shifts
+    y_shifts -= y_trend
+    x_shifts -= x_trend
 
     # Get outliers
-    outliers = np.logical_or(abs(y_shifts - y_smooth) > max_y_shift,
-                             abs(x_shifts - x_smooth) > max_x_shift)
+    outliers = np.logical_or(abs(y_shifts) > max_y_shift, abs(x_shifts) > max_x_shift)
 
     # Interpolate outliers
     num_outliers = np.sum(outliers)
     if num_outliers < num_frames - 1: # at least two good points needed for interpolation
-        y_interp = interp.interp1d(np.where(~outliers)[0], y_shifts[~outliers],
-                                   bounds_error=False, fill_value=(y_smooth[0], y_smooth[-1]))
-        x_interp = interp.interp1d(np.where(~outliers)[0], x_shifts[~outliers],
-                                   bounds_error=False, fill_value=(x_smooth[0], x_smooth[-1]))
-        y_shifts[outliers] = y_interp(np.where(outliers)[0])
-        x_shifts[outliers] = x_interp(np.where(outliers)[0])
+        #indices = np.arange(len(x_shifts))
+        #y_shifts = np.interp(indices, indices[~outliers], y_shifts[~outliers], left=0, right=0)
+        #x_shifts = np.interp(indices, indices[~outliers], x_shifts[~outliers], left=0, right=0)
+        y_shifts[outliers] = 0
+        x_shifts[outliers] = 0
     else:
         print('Warning: {} out of {} frames were outliers.'.format(num_outliers, num_frames))
-        y_shifts = y_smooth
-        x_shifts = x_smooth
+        y_shifts = 0
+        x_shifts = 0
+
+    # Add trend back to shifts
+    y_shifts += y_trend
+    x_shifts += x_trend
 
     return y_shifts, x_shifts, outliers
+
+
+def _fit_robust_line(shifts):
+    """ Use a robust linear regression algorithm to fit a line to the data."""
+    from sklearn.linear_model import TheilSenRegressor
+
+    X = np.arange(len(shifts)).reshape(-1, 1)
+    y = shifts
+    model = TheilSenRegressor() # robust regression
+    model.fit(X, y)
+    line = model.predict(X)
+
+    return line
 
 
 def correct_raster(scan, raster_phase, temporal_fill_fraction, in_place=True):
@@ -235,15 +258,15 @@ def correct_raster(scan, raster_phase, temporal_fill_fraction, in_place=True):
     return scan
 
 
-def correct_motion(scan, xy_shifts, in_place=True):
+def correct_motion(scan, x_shifts, y_shifts, in_place=True):
     """ Motion correction for multi-photon scans.
 
     Shifts each image in the scan x_shift pixels to the left and y_shift pixels up.
 
     :param np.array scan: Volume with images to be corrected in the first two dimensions.
         Works for 2-dimensions and up, usually (image_height, image_width, num_frames).
-    :param list/np.array xy_shifts: Volume with x, y motion shifts for each image in the
-        first dimension: usually (2 x num_frames).
+    :param list/np.array x_shifts: 1-d array with x motion shifts for each image.
+    :param list/np.array y_shifts: 1-d array with x motion shifts for each image.
     :param bool in_place: If True (default), the original array is modified in place.
 
     :return: Motion corrected scan
@@ -256,6 +279,10 @@ def correct_motion(scan, xy_shifts, in_place=True):
         raise PipelineException('Scan needs to be a numpy array.')
     if scan.ndim < 2:
         raise PipelineException('Scan with less than 2 dimensions.')
+    if np.ndim(y_shifts) != 1 or np.ndim(x_shifts) != 1:
+        raise PipelineException('Dimension of one or both motion arrays differs from 1.')
+    if len(x_shifts) != len(y_shifts):
+        raise PipelineException('Length of motion arrays differ.')
 
     # Assert scan is float (integer precision is not good enough)
     if not np.issubdtype(scan.dtype, np.floating):
@@ -271,16 +298,19 @@ def correct_motion(scan, xy_shifts, in_place=True):
 
     # Reshape input (to deal with more than 2-D volumes)
     reshaped_scan = np.reshape(scan, (image_height, image_width, -1))
-    reshaped_xy = np.reshape(xy_shifts, (2, -1))
-    if reshaped_xy.shape[-1] != reshaped_scan.shape[-1]:
+    if reshaped_scan.shape[-1] != len(x_shifts):
         raise PipelineException('Scan and motion arrays have different dimensions')
 
+    # Ignore NaN values (present in some older data)
+    y_clean, x_clean = y_shifts.copy(), x_shifts.copy()
+    y_clean[np.logical_or(np.isnan(y_shifts), np.isnan(x_shifts))] = 0
+    x_clean[np.logical_or(np.isnan(y_shifts), np.isnan(x_shifts))] = 0
+
     # Shift each frame
-    yx_shifts = reshaped_xy[::-1].transpose() # put y shifts first, reshape to num_frames x 2
-    yx_shifts[np.logical_or(np.isnan(yx_shifts[:, 0]), np.isnan(yx_shifts[:, 1]))] = 0
-    for i, yx_shift in enumerate(yx_shifts):
+    for i, (y_shift, x_shift) in enumerate(zip(y_clean, x_clean)):
         image = reshaped_scan[:, :, i].copy()
-        ndi.interpolation.shift(image, -yx_shift, output=reshaped_scan[:, :, i], order=1)
+        ndimage.interpolation.shift(image, (-y_shift, -x_shift), order=1,
+                                    output=reshaped_scan[:, :, i])
 
     scan = np.reshape(reshaped_scan, original_shape)
     return scan

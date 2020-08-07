@@ -1,142 +1,136 @@
 from itertools import count
-from pprint import pprint
 
+from .utils.decorators import gitlog
 from scipy.misc import imresize
 import datajoint as dj
 from datajoint.jobs import key_hash
 from tqdm import tqdm
-
-from . import experiment, notify
-from .exceptions import PipelineException
-
-from warnings import warn
 import cv2
 import numpy as np
 import json
 import os
 from commons import lab
-import sh
 from datajoint.autopopulate import AutoPopulate
 
-try:
-    import pyfnnd
-except ImportError:
-    warn('Could not load pyfnnd.  Oopsi spike inference will fail. Install from https://github.com/cajal/PyFNND.git')
-
 from .utils.eye_tracking import ROIGrabber, PupilTracker, CVROIGrabber, ManualTracker
-from pipeline.utils import ts2sec, read_video_hdf5
 from . import config
+from .utils import h5
+from . import experiment, notify
+from .exceptions import PipelineException
+
 
 schema = dj.schema('pipeline_eye', locals())
 
-DEFAULT_PARAMETERS = dict(relative_area_threshold=0.002,
-                          ratio_threshold=1.5,
-                          error_threshold=0.1,
-                          min_contour_len=5,
-                          margin=0.02,
-                          contrast_threshold=5,
-                          speed_threshold=0.1,
-                          dr_threshold=0.1,
-                          gaussian_blur=5,
-                          extreme_meso=0,
-                          running_avg=0.4,
-                          exponent=9)
+
+DEFAULT_PARAMETERS = {'relative_area_threshold': 0.002,
+                      'ratio_threshold': 1.5,
+                      'error_threshold': 0.1,
+                      'min_contour_len': 5,
+                      'margin': 0.02,
+                      'contrast_threshold': 5,
+                      'speed_threshold': 0.1,
+                      'dr_threshold': 0.1,
+                      'gaussian_blur': 5,
+                      'extreme_meso': 0,
+                      'running_avg': 0.4,
+                      'exponent': 9
+                      }
 
 
 @schema
 class Eye(dj.Imported):
-    definition = """
-    # eye velocity and timestamps
+    definition = """  # eye movie timestamps synchronized to behavior clock
 
     -> experiment.Scan
     ---
-    total_frames                : int       # total number of frames in movie.
+    eye_time                    : longblob  # times of each movie frame in behavior clock
+    total_frames                : int       # number of frames in movie.
     preview_frames              : longblob  # 16 preview frames
-    eye_time                    : longblob  # timestamps of each frame in seconds, with same t=0 as patch and ball data
-    eye_ts=CURRENT_TIMESTAMP    : timestamp # automatic
+    eye_ts=CURRENT_TIMESTAMP    : timestamp
     """
 
     @property
     def key_source(self):
-        return (experiment.Scan() & experiment.Scan.EyeVideo().proj()) - experiment.ScanIgnored()
-
-    def grab_timestamps_and_frames(self, key, n_sample_frames=16):
-
-        import cv2
-
-        rel = experiment.Session() * experiment.Scan.EyeVideo() * experiment.Scan.BehaviorFile().proj(
-            hdf_file='filename')
-
-        info = (rel & key).fetch1()
-
-        avi_path = lab.Paths().get_local_path("{behavior_path}/{filename}".format(**info))
-        # replace number by %d for hdf-file reader
-
-        tmp = info['hdf_file'].split('.')
-        if not '%d' in tmp[0]:
-            info['hdf_file'] = tmp[0][:-1] + '%d.' + tmp[-1]
-
-        hdf_path = lab.Paths().get_local_path("{behavior_path}/{hdf_file}".format(**info))
-
-        data = read_video_hdf5(hdf_path)
-        packet_length = data['analogPacketLen']
-        dat_time, _ = ts2sec(data['ts'], packet_length)
-
-        if float(data['version']) == 2.:
-            cam_key = 'eyecam_ts'
-            eye_time, _ = ts2sec(data[cam_key][0])
-        else:
-            cam_key = 'cam1ts' if info['rig'] == '2P3' else 'cam2ts'
-            eye_time, _ = ts2sec(data[cam_key])
-
-        total_frames = len(eye_time)
-
-        frame_idx = np.floor(np.linspace(0, total_frames - 1, n_sample_frames))
-
-        cap = cv2.VideoCapture(avi_path)
-        no_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-
-        if total_frames != no_frames:
-            warn("{total_frames} timestamps, but {no_frames}  movie frames.".format(total_frames=total_frames,
-                                                                                    no_frames=no_frames))
-            if total_frames > no_frames and total_frames and no_frames:
-                total_frames = no_frames
-                eye_time = eye_time[:total_frames]
-                frame_idx = np.round(np.linspace(0, total_frames - 1, n_sample_frames)).astype(int)
-            else:
-                raise PipelineException('Can not reconcile frame count', key)
-        frames = []
-        for frame_pos in frame_idx:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_pos)
-            ret, frame = cap.read()
-
-            frames.append(np.asarray(frame, dtype=float)[..., 0])
-        frames = np.stack(frames, axis=2)
-
-        return eye_time, frames, total_frames
+        return experiment.Scan() & experiment.Scan.EyeVideo().proj()
 
     def _make_tuples(self, key):
-        key['eye_time'], key['preview_frames'], key['total_frames'] = self.grab_timestamps_and_frames(key)
+        # Get behavior filename
+        behavior_path = (experiment.Session() & key).fetch1('behavior_path')
+        local_path = lab.Paths().get_local_path(behavior_path)
+        filename = (experiment.Scan.BehaviorFile() & key).fetch1('filename')
+        full_filename = os.path.join(local_path, filename)
 
-        self.insert1(key)
-        del key['eye_time']
-        frames = key.pop('preview_frames')
+        # Read file
+        data = h5.read_behavior_file(full_filename)
+
+        # Read counter timestamps and convert to seconds
+        if data['version'] == '1.0': # older h5 format
+            rig = (experiment.Session() & key).fetch('rig')
+            timestamps_in_secs = h5.ts2sec(data['cam1_ts' if rig == '2P3' else 'cam2_ts'])
+        else:
+            timestamps_in_secs = h5.ts2sec(data['eyecam_ts'][0])
+        ts = h5.ts2sec(data['ts'], is_packeted=True)
+        # edge case when ts and eye ts start in different sides of the master clock max value 2 **32
+        if abs(ts[0] - timestamps_in_secs[0]) > 2 ** 31:
+            timestamps_in_secs += (2 ** 32 if ts[0] > timestamps_in_secs[0] else -2 ** 32)
+
+        # Fill with NaNs for out-of-range data or mistimed packets (NaNs in ts)
+        timestamps_in_secs[timestamps_in_secs < ts[0]] = float('nan')
+        timestamps_in_secs[timestamps_in_secs > ts[-1]] = float('nan')
+        nan_limits = np.where(np.diff([0, *np.isnan(ts), 0]))[0]
+        for start, stop in zip(nan_limits[::2], nan_limits[1::2]):
+            lower_ts = float('-inf') if start == 0 else ts[start - 1]
+            upper_ts = float('inf') if stop == len(ts) else ts[stop]
+            timestamps_in_secs[np.logical_and(timestamps_in_secs > lower_ts,
+                                              timestamps_in_secs < upper_ts)] = float('nan')
+
+        # Read video
+        filename = (experiment.Scan.EyeVideo() & key).fetch1('filename')
+        full_filename = os.path.join(local_path, filename)
+        video = cv2.VideoCapture(full_filename) # note: prints many 'Unexpected list ...'
+
+        # Fix inconsistent num_video_frames vs num_timestamps
+        num_video_frames = int(video.get(cv2.CAP_PROP_FRAME_COUNT))
+        num_timestamps = len(timestamps_in_secs)
+        if num_timestamps != num_video_frames:
+            if abs(num_timestamps - num_video_frames) > 1:
+                msg = ('Number of movie frames and timestamps differ: {} frames vs {} '
+                       'timestamps'). format(num_video_frames, num_timestamps)
+                raise PipelineException(msg)
+            elif num_timestamps > num_video_frames: # cut timestamps to match video frames
+                timestamps_in_secs = timestamps_in_secs[:-1]
+            else: # fill with NaNs
+                timestamps_in_secs = np.array([*timestamps_in_secs, float('nan')])
+
+        # Get 16 sample frames
+        frames = []
+        for frame_idx in np.round(np.linspace(0, num_video_frames - 1, 16)).astype(int):
+            video.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+            _, frame = video.read()
+            frames.append(np.asarray(frame, dtype=float)[..., 0])
+        frames = np.stack(frames, axis=-1)
+
+        # Insert
+        self.insert1({**key, 'eye_time': timestamps_in_secs,
+                      'total_frames': len(timestamps_in_secs), 'preview_frames': frames})
         self.notify(key, frames)
 
+    @notify.ignore_exceptions
     def notify(self, key, frames):
         import imageio
-        msg = 'Eye for `{}` has been populated. You can add a tracking task now. '.format(key)
-        img_filename = '/tmp/' + key_hash(key) + '.gif'
-        frames = frames.transpose([2, 0, 1])
-        frames = [imresize(img, 0.25) for img in frames]
-        imageio.mimsave(img_filename, frames, duration=0.5)
-        (notify.SlackUser() & (experiment.Session() & key)).notify(msg, file=img_filename,
-                                                                   file_title='preview frames',
-                                                                   channel='#pipeline_quality')
+
+        video_filename = '/tmp/' + key_hash(key) + '.gif'
+        frames = [imresize(img, 0.25) for img in frames.transpose([2, 0, 1])]
+        imageio.mimsave(video_filename, frames, duration=0.5)
+
+        msg = 'eye frames for {animal_id}-{session}-{scan_idx}'.format(**key)
+        slack_user = notify.SlackUser() & (experiment.Session() & key)
+        slack_user.notify(file=video_filename, file_title=msg, channel='#pipeline_quality')
 
     def get_video_path(self):
         video_info = (experiment.Session() * experiment.Scan.EyeVideo() & self).fetch1()
-        return lab.Paths().get_local_path("{behavior_path}/{filename}".format(**video_info))
+        video_path = lab.Paths().get_local_path("{behavior_path}/{filename}".format(**video_info))
+        return video_path
 
 
 @schema
@@ -183,7 +177,6 @@ class TrackingTask(dj.Manual):
         key = (Eye() & key).fetch1(dj.key)  # complete key
         frames = (Eye() & key).fetch1('preview_frames')
         try:
-            import cv2
             print('Drag window and print q when done')
             rg = CVROIGrabber(frames.mean(axis=2))
             rg.grab()
@@ -265,8 +258,12 @@ class TrackedVideo(dj.Computed):
             trace.update(key)
             fr.insert1(trace, ignore_extra_fields=True)
 
-        (notify.SlackUser() & (experiment.Session() & key)).notify(
-            'Pupil tracking for {} has been populated'.format(str(key)))
+        self.notify(key)
+
+    @notify.ignore_exceptions
+    def notify(self, key):
+        msg = 'Pupil tracking for {} has been populated'.format(key)
+        (notify.SlackUser() & (experiment.Session() & key)).notify(msg)
 
     def plot_traces(self, outdir='./', show=False):
         """
@@ -278,7 +275,7 @@ class TrackedVideo(dj.Computed):
         import matplotlib.pyplot as plt
         plt.switch_backend('GTK3Agg')
 
-        for key in self.fetch.keys():
+        for key in self.fetch('KEY'):
             print('Processing', key)
             with sns.axes_style('ticks'):
                 fig, ax = plt.subplots(3, 1, figsize=(10, 6), sharex=True)
@@ -371,11 +368,13 @@ class TrackedVideo(dj.Computed):
 
 
 @schema
+@gitlog
 class ManuallyTrackedContours(dj.Manual, AutoPopulate):
     definition = """
     -> Eye
     ---
     tracking_ts=CURRENT_TIMESTAMP    : timestamp  # automatic
+    min_lambda=null                  : float      # minimum mixing weight for current frame in running average computation (1 means no running avg was used)
     """
 
     class Frame(dj.Part):
@@ -386,24 +385,97 @@ class ManuallyTrackedContours(dj.Manual, AutoPopulate):
         contour=NULL             : longblob      # eye contour relative to ROI
         """
 
-    def make(self, key):
+    class Parameter(dj.Part):
+        definition = """
+        -> master.Frame
+        ---
+        roi=NULL                : longblob  # roi of eye
+        gauss_blur=NULL         : float     # bluring of ROI
+        exponent=NULL           : tinyint   # exponent for contrast enhancement
+        dilation_iter=NULL      : tinyint   # number of dilation and erosion operations
+        min_contour_len=NULL    : tinyint   # minimal contour length
+        running_avg_mix=NULL    : float     # weight a in a * current_frame + (1-a) * running_avg 
+        """
+
+    def make(self, key, backup_file=None):
+        print("Populating", key)
+
+
+        if backup_file is None:
+            avi_path = (Eye() & key).get_video_path()
+            tracker = ManualTracker(avi_path)
+            tracker.backup_file = '/tmp/tracker_state{animal_id}-{session}-{scan_idx}.pkl'.format(**key)
+        else:
+            tracker = ManualTracker.from_backup(backup_file)
+
+        try:
+            tracker.run()
+        except:
+            tracker.backup()
+            raise
+
+        logtrace = tracker.mixing_constant.logtrace.astype(float)
+        self.insert1(dict(key, min_lambda=logtrace[logtrace > 0].min()))
+        self.log_git(key)
+        frame = self.Frame()
+        parameters = self.Parameter()
+        for frame_id, ok, contour, params in tqdm(zip(count(), tracker.contours_detected, tracker.contours,
+                                              tracker.parameter_iter()),
+                                          total=len(tracker.contours)):
+            assert frame_id == params['frame_id']
+            if ok:
+                frame.insert1(dict(key, frame_id=frame_id, contour=contour))
+            else:
+                frame.insert1(dict(key, frame_id=frame_id))
+            parameters.insert1(dict(key, **params), ignore_extra_fields=True)
+
+
+    def warm_start(self, key, backup_file):
+        assert not key in self, '{} should not be in the table already!'
+        with self.connection.transaction:
+            self.make(key, backup_file)
+
+
+    def update(self, key):
         print("Populating", key)
 
         avi_path = (Eye() & key).get_video_path()
 
         tracker = ManualTracker(avi_path)
-        tracker.run()
-        self.insert1(key)
-        frames = []
-        frame = self.Frame()
-        for frame_id, ok, contour in tqdm(zip(count(), tracker.contours_detected, tracker.contours),
-                                          total=len(tracker.contours)):
-            if ok:
-                frame.insert1(dict(key, frame_id=frame_id, contour=contour))
-            else:
-                frame.insert1(dict(key, frame_id=frame_id))
+        contours = (self.Frame() & key).fetch('contour', order_by='frame_id')
+        tracker.contours = np.array(contours)
+        tracker.contours_detected = np.array([e is not None for e in contours])
+        tracker.backup_file = '/tmp/tracker_update_state{animal_id}-{session}-{scan_idx}.pkl'.format(**key)
 
+        try:
+            tracker.run()
+        except Exception as e:
+            print(str(e))
+            answer = input('Tracker crashed. Do you want to save the content anyway [y/n]?').lower()
+            while answer not in ['y', 'n']:
+                answer = input('Tracker crashed. Do you want to save the content anyway [y/n]?').lower()
+            if answer == 'n':
+                raise
+        if input('Do you want to delete and replace the existing entries? Type "YES" for acknowledgement.') == "YES":
+            with dj.config(safemode=False):
+                with self.connection.transaction:
+                    (self & key).delete()
 
+                    logtrace = tracker.mixing_constant.logtrace.astype(float)
+                    self.insert1(dict(key, min_lambda=logtrace[logtrace > 0].min()))
+                    self.log_key(key)
+
+                    frame = self.Frame()
+                    parameters = self.Parameter()
+                    for frame_id, ok, contour, params in tqdm(zip(count(), tracker.contours_detected, tracker.contours,
+                                                                  tracker.parameter_iter()),
+                                                              total=len(tracker.contours)):
+                        assert frame_id == params['frame_id']
+                        if ok:
+                            frame.insert1(dict(key, frame_id=frame_id, contour=contour))
+                        else:
+                            frame.insert1(dict(key, frame_id=frame_id))
+                        parameters.insert1(dict(key, **params), ignore_extra_fields=True)
 @schema
 class FittedContour(dj.Computed):
     definition = """
