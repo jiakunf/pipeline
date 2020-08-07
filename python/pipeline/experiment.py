@@ -470,12 +470,21 @@ class HasFilename:
     def local_filenames_as_wildcard(self):
         """Returns the local filename for all parts of this scan (ends in *.tif)."""
         scan_path = (Session() & self).fetch1('scan_path')
+
+        # TODO: test local cache
         local_path = lab.Paths().get_local_path(scan_path)
+        drive_idx = scan_path.find('/scratch') + 1
+        drive_name = scan_path[drive_idx: drive_idx + 9]
+        cache_path = scan_path.replace(drive_name, 'md0')
 
         scan_name = (self.__class__() & self.proj()).fetch1('filename')
         local_filename = os.path.join(local_path, scan_name) + '*.tif'  # all parts
-
-        return local_filename
+        cache_filename = os.path.join(cache_path, scan_name) + '*.tif'
+        test_file = os.path.join(cache_path, scan_name) + '00001.tif'
+        if os.path.exists(test_file):
+            return cache_filename
+        else:
+            return local_filename
 
 
 @schema
