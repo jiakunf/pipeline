@@ -328,6 +328,7 @@ class RasterCorrection(dj.Computed):
 
     def make(self, key):
         from scipy.signal import tukey
+        print('Populating ', key)
 
         # Read the scan
         scan_filename = (experiment.Scan() & key).local_filenames_as_wildcard
@@ -396,6 +397,7 @@ class MotionCorrection(dj.Computed):
     def make(self, key):
         """Computes the motion shifts per frame needed to correct the scan."""
         from scipy import ndimage
+        print('Populating ', key)
 
         # Read the scan
         scan_filename = (experiment.Scan() & key).local_filenames_as_wildcard
